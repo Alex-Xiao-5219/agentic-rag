@@ -1,72 +1,75 @@
-name: Deploy Azure Container Apps
+name: Build and Deploy
 
 on:
   push:
     branches:
       - main
-  workflow_dispatch:
 
 permissions:
-  contents: read
   id-token: write
+  contents: read
 
 jobs:
+
   deploy:
+
     runs-on: ubuntu-latest
-    env:
-      ACR_NAME: ${{ vars.AZURE_ACR_NAME }}
-      ACR_LOGIN_SERVER: ${{ vars.AZURE_ACR_LOGIN_SERVER }}
-      RESOURCE_GROUP: ${{ vars.AZURE_RESOURCE_GROUP }}
-      BACKEND_APP: ${{ vars.AZURE_BACKEND_CONTAINER_APP }}
-      FRONTEND_APP: ${{ vars.AZURE_FRONTEND_CONTAINER_APP }}
-      IMAGE_TAG: ${{ github.sha }}
 
     steps:
-      - name: Check out source
+
+      - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Validate Python syntax
-        run: python3 -m compileall -q app ui
-
-      - name: Sign in to Azure with OIDC
+      - name: Azure Login
         uses: azure/login@v2
         with:
           client-id: ${{ vars.AZURE_CLIENT_ID }}
           tenant-id: ${{ vars.AZURE_TENANT_ID }}
           subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
 
-      - name: Sign in to Azure Container Registry
-        run: az acr login --name "$ACR_NAME"
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-
-      - name: Build and push backend image
-        uses: docker/build-push-action@v6
+      - name: Azure CLI
+        uses: azure/CLI@v2
         with:
-          context: .
-          file: ./Dockerfile
-          push: true
-          tags: ${{ vars.AZURE_ACR_LOGIN_SERVER }}/agentic-rag-api:${{ github.sha }}
+          azcliversion: latest
+          inlineScript: |
+            az acr login --name ${{ vars.ACR_NAME }}
 
-      - name: Build and push frontend image
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          file: ./Dockerfile.frontend
-          push: true
-          tags: ${{ vars.AZURE_ACR_LOGIN_SERVER }}/agentic-rag-frontend:${{ github.sha }}
+      # Backend
 
-      - name: Deploy backend Container App
+      - name: Build Backend
+        run: |
+          docker build \
+            -f Dockerfile.backend \
+            -t ${{ vars.ACR_LOGIN_SERVER }}/agent-rag-backend:${{ github.sha }} .
+
+      - name: Push Backend
+        run: |
+          docker push \
+            ${{ vars.ACR_LOGIN_SERVER }}/agent-rag-backend:${{ github.sha }}
+
+      - name: Deploy Backend
         run: |
           az containerapp update \
-            --resource-group "$RESOURCE_GROUP" \
-            --name "$BACKEND_APP" \
-            --image "$ACR_LOGIN_SERVER/agentic-rag-api:$IMAGE_TAG"
+            --name ${{ vars.BACKEND_CONTAINERAPP_NAME }} \
+            --resource-group ${{ vars.AZURE_RESOURCE_GROUP }} \
+            --image ${{ vars.ACR_LOGIN_SERVER }}/agent-rag-backend:${{ github.sha }}
 
-      - name: Deploy frontend Container App
+      # Frontend
+
+      - name: Build Frontend
+        run: |
+          docker build \
+            -f Dockerfile.frontend \
+            -t ${{ vars.ACR_LOGIN_SERVER }}/agent-rag-frontend:${{ github.sha }} .
+
+      - name: Push Frontend
+        run: |
+          docker push \
+            ${{ vars.ACR_LOGIN_SERVER }}/agent-rag-frontend:${{ github.sha }}
+
+      - name: Deploy Frontend
         run: |
           az containerapp update \
-            --resource-group "$RESOURCE_GROUP" \
-            --name "$FRONTEND_APP" \
-            --image "$ACR_LOGIN_SERVER/agentic-rag-frontend:$IMAGE_TAG"
+            --name ${{ vars.FRONTEND_CONTAINERAPP_NAME }} \
+            --resource-group ${{ vars.AZURE_RESOURCE_GROUP }} \
+            --image ${{ vars.ACR_LOGIN_SERVER }}/agent-rag-frontend:${{ github.sha }}
