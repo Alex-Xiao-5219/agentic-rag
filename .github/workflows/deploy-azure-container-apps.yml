@@ -10,7 +10,6 @@ permissions:
   contents: read
 
 jobs:
-
   deploy:
 
     runs-on: ubuntu-latest
@@ -27,20 +26,27 @@ jobs:
           tenant-id: ${{ vars.AZURE_TENANT_ID }}
           subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
 
-      - name: Azure CLI
-        uses: azure/CLI@v2
-        with:
-          azcliversion: latest
-          inlineScript: |
-            az acr login --name ${{ vars.ACR_NAME }}
+      - name: Debug Variables
+        run: |
+          echo "ACR_NAME=${{ vars.ACR_NAME }}"
+          echo "ACR_LOGIN_SERVER=${{ vars.ACR_LOGIN_SERVER }}"
+          echo "RESOURCE_GROUP=${{ vars.AZURE_RESOURCE_GROUP }}"
 
+      # Login ACR
+      - name: Login to ACR
+        run: |
+          az acr login --name ${{ vars.ACR_NAME }}
+
+      ###################################
       # Backend
+      ###################################
 
       - name: Build Backend
         run: |
           docker build \
-            -f Dockerfile.backend \
-            -t ${{ vars.ACR_LOGIN_SERVER }}/agent-rag-backend:${{ github.sha }} .
+            -f Dockerfile \
+            -t ${{ vars.ACR_LOGIN_SERVER }}/agent-rag-backend:${{ github.sha }} \
+            .
 
       - name: Push Backend
         run: |
@@ -54,13 +60,16 @@ jobs:
             --resource-group ${{ vars.AZURE_RESOURCE_GROUP }} \
             --image ${{ vars.ACR_LOGIN_SERVER }}/agent-rag-backend:${{ github.sha }}
 
+      ###################################
       # Frontend
+      ###################################
 
       - name: Build Frontend
         run: |
           docker build \
             -f Dockerfile.frontend \
-            -t ${{ vars.ACR_LOGIN_SERVER }}/agent-rag-frontend:${{ github.sha }} .
+            -t ${{ vars.ACR_LOGIN_SERVER }}/agent-rag-frontend:${{ github.sha }} \
+            .
 
       - name: Push Frontend
         run: |
