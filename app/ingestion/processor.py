@@ -21,11 +21,14 @@ logfire.configure(
 
 # Local folder where parsed + chunked JSON metadata is saved (replaces GCS processed bucket)
 PROCESSED_DATA_DIR = "processed_data"
+QDRANT_REQUEST_TIMEOUT = 60
+QDRANT_UPSERT_BATCH_SIZE = 32
 
 # Initialize Qdrant Client
 qdrant_client = QdrantClient(
     url=settings.QDRANT_URL,
     api_key=settings.QDRANT_API_KEY,
+    timeout=QDRANT_REQUEST_TIMEOUT,
     check_compatibility=False,
 )
 
@@ -38,6 +41,18 @@ def save_processed_locally(data: dict, source_type: str, filename: str) -> str:
     with open(dest, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
     return dest
+
+
+def ensure_source_payload_indexes() -> None:
+    for field_name in ("source", "source_type"):
+        qdrant_client.create_payload_index(
+            collection_name=settings.QDRANT_COLLECTION,
+            field_name=field_name,
+            field_schema=models.PayloadSchemaType.KEYWORD,
+            wait=True,
+            timeout=QDRANT_REQUEST_TIMEOUT,
+        )
+    logfire.info("Qdrant keyword indexes ready for source replacement.")
 
 
 def process_file(file_path: str, filename: str, source_type: str):
@@ -82,7 +97,12 @@ def process_file(file_path: str, filename: str, source_type: str):
                 embeddings = embed_texts(chunks)
                 points = [
                     models.PointStruct(
-                        id=str(uuid.uuid4()),
+                        id=str(
+                            uuid.uuid5(
+                                uuid.NAMESPACE_URL,
+                                f"enterprise-rag:{source_type}:{filename}:{index}",
+                            )
+                        ),
                         vector=vector,
                         payload={
                             "text": chunk,
@@ -90,17 +110,47 @@ def process_file(file_path: str, filename: str, source_type: str):
                             "source_type": source_type,
                         },
                     )
-                    for chunk, vector in zip(chunks, embeddings)
+                    for index, (chunk, vector) in enumerate(zip(chunks, embeddings))
                 ]
 
-                qdrant_client.upsert(
-                    collection_name=settings.QDRANT_COLLECTION,
-                    points=points,
+                source_filter = models.Filter(
+                    must=[
+                        models.FieldCondition(
+                            key="source",
+                            match=models.MatchValue(value=filename),
+                        ),
+                        models.FieldCondition(
+                            key="source_type",
+                            match=models.MatchValue(value=source_type),
+                        ),
+                    ]
                 )
-                logfire.info(f"Indexed {len(points)} points to Qdrant from {filename}.")
+                qdrant_client.delete(
+                    collection_name=settings.QDRANT_COLLECTION,
+                    points_selector=source_filter,
+                    wait=True,
+                    timeout=QDRANT_REQUEST_TIMEOUT,
+                )
+                for start in range(0, len(points), QDRANT_UPSERT_BATCH_SIZE):
+                    batch = points[start : start + QDRANT_UPSERT_BATCH_SIZE]
+                    with logfire.span(
+                        "Qdrant upsert batch",
+                        start=start,
+                        size=len(batch),
+                    ):
+                        qdrant_client.upsert(
+                            collection_name=settings.QDRANT_COLLECTION,
+                            points=batch,
+                            wait=True,
+                            timeout=QDRANT_REQUEST_TIMEOUT,
+                        )
+                logfire.info(
+                    f"Indexed {len(points)} points to Qdrant from {filename}."
+                )
 
         except Exception as e:  # noqa: BLE001
             logfire.error(f"Failed to process {filename}: {e}")
+            raise
 
 
 def process_directory(dir_path: str, source_type: str):
@@ -140,6 +190,8 @@ def run_universal_ingestion(base_dir: str, explicit_source_type: str | None = No
                 f"Created collection '{settings.QDRANT_COLLECTION}' "
                 f"({dim}-dim, Cosine)."
             )
+
+        ensure_source_payload_indexes()
 
         # Route to sub-folders or treat the whole dir as one source
         subdirs = [

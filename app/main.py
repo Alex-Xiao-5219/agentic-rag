@@ -8,13 +8,12 @@ from fastapi.responses import JSONResponse
 
 from langfuse import get_client, propagate_attributes
 from langfuse.langchain import CallbackHandler
-
 from pydantic import BaseModel
 
-from app.fast_path.fast_path import fast_path
-from app.security.security import security_check
-from app.router.router import determine_route, RouteType
-from app.router.chat import chat_response
+from app.gateway import create_chat_completion
+from app.router.capability_router import determine_route
+from app.router.executor import execute_tool
+from app.router.models import Capability
 
 load_dotenv()
 
@@ -40,8 +39,10 @@ langfuse = get_client()
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    yield
-    langfuse.flush()
+    try:
+        yield
+    finally:
+        langfuse.flush()
 
 
 app = FastAPI(
@@ -88,148 +89,115 @@ def query(request: QueryRequest):
                 user_id=thread_id,
                 session_id=thread_id,
             ):
+                decision = determine_route(q)
+                print("ROUTE =", decision)
 
-                # ==================================================
-                # STEP 1 : FAST PATH
-                # ==================================================
-
-                hit, response = fast_path(q)
-
-                if hit:
-
+                if decision.capability == Capability.BLOCK:
                     payload = {
                         "question": q,
-                        "answer": response,
-                        "status": "FAST_PATH",
+                        "answer": (
+                            "I can help with enterprise IT, technical knowledge, "
+                            "and related analysis."
+                        ),
+                        "thought_process": ["Capability: BLOCK"],
+                        "status": "Blocked",
                         "sources": [],
                     }
-
                     span.update(output=payload)
-
                     return payload
 
-                # ==================================================
-                # STEP 2 : SECURITY
-                # ==================================================
-
-                blocked, reason = security_check(q)
-
-                if blocked:
-
+                if decision.capability == Capability.TOOL:
+                    if decision.tool_name is None:
+                        raise ValueError("Tool route is missing a tool name.")
+                    tool_output = execute_tool(
+                        decision.tool_name,
+                        query=q,
+                    )
                     payload = {
                         "question": q,
-                        "answer": reason,
-                        "status": "BLOCKED",
+                        "answer": tool_output["answer"],
+                        "thought_process": [
+                            f"Capability: TOOL ({decision.tool_name.value})"
+                        ],
+                        "status": tool_output["status"],
                         "sources": [],
                     }
-
                     span.update(output=payload)
-
                     return payload
 
-                # ==================================================
-                # STEP 3 : ROUTER
-                # ==================================================
-
-                route = determine_route(q)
-
-                # ==================================================
-                # CHAT
-                # ==================================================
-
-                if route == RouteType.CHAT:
-
-                    answer = chat_response(q)
-
+                if decision.capability == Capability.CHAT:
+                    response = create_chat_completion(
+                        messages=[
+                            {
+                                "role": "system",
+                                "content": (
+                                    "You are a helpful enterprise IT assistant. "
+                                    "Answer concisely."
+                                ),
+                            },
+                            {"role": "user", "content": q},
+                        ],
+                        deployment=decision.model,
+                    )
+                    answer = response.choices[0].message.content
                     payload = {
                         "question": q,
                         "answer": answer,
-                        "status": "CHAT",
+                        "thought_process": ["Capability: CHAT"],
+                        "status": "Completed",
                         "sources": [],
                     }
-
                     span.update(output=payload)
-
                     return payload
 
-                # ==================================================
-                # RAG
-                # ==================================================
-
-                if route == RouteType.RAG:
-
-                    from app.agents.graph import rag_agent
-
-                    initial_state = {
-                        "messages": [
-                            {
-                                "role": "user",
-                                "content": q
-                            }
-                        ],
-                        "current_query": q,
-                        "documents": [],
-                        "plan": ["Start"],
-                        "status": "Initializing RAG",
-                    }
-
-                    langfuse_handler = CallbackHandler()
-
-                    config = {
-                        "configurable": {
-                            "thread_id": thread_id
-                        },
-                        "callbacks": [
-                            langfuse_handler
-                        ],
-                    }
-
-                    final_output = rag_agent.invoke(
-                        initial_state,
-                        config=config,
+                if decision.capability not in {
+                    Capability.RAG,
+                    Capability.REASONING,
+                }:
+                    raise ValueError(
+                        f"Unsupported capability: {decision.capability.value}"
                     )
 
-                    payload = {
-                        "question": q,
-                        "answer": final_output.get(
-                            "final_answer"
-                        ),
-                        "thought_process": final_output.get(
-                            "plan"
-                        ),
-                        "status": "RAG",
-                        "sources": final_output.get(
-                            "documents",
-                            [],
-                        ),
-                    }
+                from app.agents.graph import rag_agent
 
-                    span.update(output=payload)
+                initial_state = {
+                    "messages": [
+                        {
+                            "role": "user",
+                            "content": q,
+                        }
+                    ],
+                    "current_query": q,
+                    "documents": [],
+                    "plan": [f"Capability: {decision.capability.value}"],
+                    "status": "Retrieving enterprise context",
+                }
 
-                    return payload
+                langfuse_handler = CallbackHandler()
+                config = {
+                    "configurable": {
+                        "thread_id": thread_id,
+                        "model_deployment": decision.model,
+                    },
+                    "callbacks": [langfuse_handler],
+                }
 
-                # ==================================================
-                # AGENT (未来扩展)
-                # ==================================================
-
-                if route == RouteType.AGENT:
-
-                    answer = chat_response(q)
-
-                    payload = {
-                        "question": q,
-                        "answer": answer,
-                        "status": "AGENT",
-                        "sources": [],
-                    }
-
-                    span.update(output=payload)
-
-                    return payload
-
-        return {
-            "status": "UNKNOWN_ROUTE"
-        }
+                final_output = rag_agent.invoke(
+                    initial_state,
+                    config=config,
+                )
+                payload = {
+                    "question": q,
+                    "answer": final_output.get("final_answer"),
+                    "thought_process": [
+                        f"Capability: {decision.capability.value}",
+                        *(final_output.get("plan") or []),
+                    ],
+                    "status": final_output.get("status"),
+                    "sources": final_output.get("documents", []),
+                }
+                span.update(output=payload)
+                return payload
 
     except Exception as e:
 

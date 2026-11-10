@@ -15,7 +15,6 @@ langchain-openai==1.4.2
 langgraph==1.2.10
 
 qdrant-client==1.19.0
-nemoguardrails==0.23.0
 
 logfire[fastapi,requests]==4.40.0
 loguru==0.7.3

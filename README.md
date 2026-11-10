@@ -1,8 +1,8 @@
 # Enterprise Agentic RAG Assistant
 
-A production-style Agentic RAG system for enterprise document intelligence. It combines a FastAPI backend, LangGraph agent workflow, Qdrant vector search, NeMo Guardrails, LLM-based reranking, Langfuse tracing, Logfire monitoring, Streamlit UI, and an evaluation pipeline.
+A production-style Agentic RAG system for enterprise document intelligence. It combines a FastAPI backend, capability routing, deterministic tools, a LangGraph agent workflow, Qdrant vector search, LLM-based reranking, Langfuse tracing, Logfire monitoring, Streamlit UI, and an evaluation pipeline.
 
-This project is designed as an interview-ready backend + AI systems showcase: it demonstrates how a real RAG application can separate UI, API, retrieval, guardrails, observability, ingestion, and evaluation into clean modules.
+This project is designed as an interview-ready backend + AI systems showcase: it demonstrates how a real RAG application can separate UI, API, routing, retrieval, observability, ingestion, and evaluation into clean modules.
 
 ![Enterprise Agentic RAG Architecture](DOCS/assets/enterprise-agentic-rag-architecture.png)
 
@@ -15,17 +15,17 @@ The assistant answers questions from a curated technical documentation corpus wh
 Core flow:
 
 ```text
-User -> Streamlit UI -> FastAPI /query -> Guardrails -> LangGraph Agent
-     -> Planner -> Retriever -> Qdrant -> Reranker -> Responder -> LLM
-     -> Final Answer + Sources + Trace
+User -> Streamlit UI -> FastAPI /query -> Capability Router
+     -> Tool / Chat / RAG / Reasoning -> Final Answer + Sources + Trace
 ```
 
 ---
 
 ## Key Features
 
-- **Agentic RAG workflow**: LangGraph planner, retriever, and responder nodes.
-- **Guardrails before retrieval**: NeMo Guardrails checks the user request before expensive search/LLM calls.
+- **RAG workflow**: LangGraph retrieval and response nodes, selected by the Capability Router.
+- **Capability routing**: classifies requests into tool, chat, RAG, reasoning, or blocked workflows.
+- **Deterministic tools**: answers current date/time requests without an LLM.
 - **Vector search**: Qdrant Cloud stores indexed document chunks and serves semantic retrieval.
 - **LLM-based reranking**: retrieved chunks are reranked before answer generation.
 - **Session memory**: LangGraph `MemorySaver` keeps conversation context by `thread_id`.
@@ -43,12 +43,12 @@ User -> Streamlit UI -> FastAPI /query -> Guardrails -> LangGraph Agent
 graph TD
     User((User)) --> UI[Streamlit UI]
     UI --> API[FastAPI Backend]
-    API --> Guard{NeMo Guardrails}
-    Guard -->|Blocked| Blocked[Safe Response]
-    Guard -->|Allowed| Agent[LangGraph Agent]
-    Agent --> Planner[Planner Node]
-    Planner -->|Conversational| Responder[Responder Node]
-    Planner -->|Technical Query| Retriever[Retriever Node]
+    API --> Router[Capability Router]
+    Router -->|Blocked| Blocked[Safe Response]
+    Router -->|Tool| Tool[Date and Time]
+    Router -->|Chat| Chat[Chat LLM]
+    Router -->|RAG or Reasoning| Agent[LangGraph Agent]
+    Agent --> Retriever[Retriever Node]
     Retriever --> Qdrant[(Qdrant Vector DB)]
     Qdrant --> Reranker[LLM Reranker]
     Reranker --> Responder
@@ -71,7 +71,7 @@ graph TD
 | Agent orchestration | LangGraph, LangChain |
 | LLM interface | Azure OpenAI, LangChain |
 | Vector database | Qdrant Cloud |
-| Guardrails | NeMo Guardrails |
+| Routing | Capability Router |
 | Reranking | LLM-based reranker |
 | Observability | Langfuse, Pydantic Logfire |
 | UI | Streamlit |
@@ -89,14 +89,14 @@ graph TD
 |   |   +-- graph.py
 |   |   +-- state.py
 |   |   +-- nodes/
-|   |       +-- planner.py
 |   |       +-- retriever.py
 |   |       +-- responder.py
 |   +-- gateway/
 |   |   +-- client.py
-|   +-- guardrails/
-|   |   +-- rails.py
-|   |   +-- colang_rules.py
+|   +-- router/
+|   |   +-- models.py
+|   |   +-- capability_router.py
+|   |   +-- executor.py
 |   +-- ingestion/
 |   |   +-- processor.py
 |   |   +-- chunking/
@@ -130,8 +130,8 @@ AZURE_OPENAI_API_KEY=
 AZURE_OPENAI_ENDPOINT=https://<resource-name>.openai.azure.com/
 AZURE_OPENAI_API_VERSION=
 AZURE_OPENAI_CHAT_DEPLOYMENT=
-AZURE_OPENAI_PLANNER_DEPLOYMENT=
-AZURE_OPENAI_GUARDRAIL_DEPLOYMENT=
+AZURE_OPENAI_ROUTER_DEPLOYMENT=
+AZURE_OPENAI_REASONING_DEPLOYMENT=
 AZURE_OPENAI_EMBEDDING_DEPLOYMENT=
 AZURE_OPENAI_RERANK_DEPLOYMENT=
 AZURE_OPENAI_EVAL_DEPLOYMENT=
@@ -151,7 +151,7 @@ BACKEND_URL=http://localhost:8000
 
 ```
 
-`AZURE_OPENAI_PLANNER_DEPLOYMENT` should be set to the Azure deployment name for the planner model (for example, `gpt-4.1-nano`). If unset, the planner uses `AZURE_OPENAI_CHAT_DEPLOYMENT`.
+`AZURE_OPENAI_ROUTER_DEPLOYMENT` optionally selects the capability-router model; it defaults to `AZURE_OPENAI_CHAT_DEPLOYMENT`. `AZURE_OPENAI_REASONING_DEPLOYMENT` optionally selects the answer model for reasoning workflows; it defaults to `AZURE_OPENAI_CHAT_DEPLOYMENT`.
 
 ---
 
@@ -176,7 +176,13 @@ pip install -r requirements.txt
 python -m app.ingestion.processor DATA --wipe
 ```
 
-Use `--wipe` when you want to recreate the Qdrant collection from scratch.
+Ingestion writes vectors to Qdrant in batches. Reprocessing a document replaces
+its existing points by filename and source type. `--wipe` deletes and recreates
+the entire `enterprise_rag` collection before importing `DATA`; all previously
+indexed documents not present in `DATA` will be removed. It does not delete
+local files or the `processed_data/` directory. Ingestion creates keyword
+payload indexes on `source` and `source_type` so it can safely replace the
+document's existing vectors.
 
 ### 4. Run the backend
 
@@ -287,12 +293,11 @@ The Container Apps must already be configured with their runtime environment var
 | --- | --- |
 | [System Overview](DOCS/01_SYSTEM_OVERVIEW.md) | End-to-end system flow |
 | [Ingestion Engine](DOCS/02_INGESTION_ENGINE.md) | Document parsing and chunk indexing |
-| [Node Intelligence](DOCS/03_NODE_INTELLIGENCE.md) | Planner, retriever, responder internals |
+| [Node Intelligence](DOCS/03_NODE_INTELLIGENCE.md) | Retriever and responder internals |
 | [Tracing and Observability](DOCS/04_TRACING_AND_OBSERVABILITY.md) | Logfire and tracing design |
 | [Environment Variables](DOCS/05_ENVIRONMENT_VARIABLES.md) | Configuration reference |
 | [Known Gotchas](DOCS/06_KNOWN_GOTCHAS.md) | Bugs, fixes, and design notes |
 | [Azure OpenAI Reranking](DOCS/07_AZURE_RERANKING.md) | Azure LLM reranking strategy |
-| [Guardrails](DOCS/08_GUARDRAILS.md) | NeMo Guardrails implementation |
 | [LLM Gateway](DOCS/09_LLM_GATEWAY.md) | Gateway abstraction and routing |
 | [Evals](DOCS/10_EVALS.md) | Evaluation theory and metrics |
 | [Evals Pipeline](DOCS/11_EVALS_PIPELINE.md) | Live evaluation workflow |
