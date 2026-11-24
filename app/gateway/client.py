@@ -22,7 +22,6 @@ def get_langchain_llm(feature: str = "rag") -> AzureChatOpenAI:
         azure_deployment=deployment,
         api_version=settings.AZURE_OPENAI_API_VERSION,
         api_key=settings.AZURE_OPENAI_API_KEY,
-        **({"temperature": 0} if feature == "router" else {}),
     )
 
 
